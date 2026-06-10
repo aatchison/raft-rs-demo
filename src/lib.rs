@@ -64,6 +64,16 @@ pub struct AppendEntries {
 }
 
 impl Node {
+    /// Creates a new Node initialized as a Follower with term 0 and an empty log.
+    pub fn new() -> Self {
+        Node {
+            current_term: 0,
+            voted_for: None,
+            log: Vec::new(),
+            role: Role::Follower,
+        }
+    }
+
     /// Handles an incoming RequestVote RPC.
     ///
     /// Returns `true` if the vote is granted.
@@ -76,5 +86,28 @@ impl Node {
     /// Returns `true` if the request is accepted.
     pub fn handle_append_entries(&mut self, req: &AppendEntries) -> bool {
         todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_initial_state() {
+        let node = Node::new();
+        assert_eq!(node.current_term, 0);
+        assert_eq!(node.role, Role::Follower);
+        assert!(node.log.is_empty());
+    }
+
+    #[test]
+    fn log_entry_construction() {
+        let entry = LogEntry {
+            term: 1,
+            command: "set x = 10".to_string(),
+        };
+        assert_eq!(entry.term, 1);
+        assert_eq!(entry.command, "set x = 10");
     }
 }
