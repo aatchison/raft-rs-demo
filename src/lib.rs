@@ -95,6 +95,32 @@ impl Node {
         }
     }
 
+    /// Transitions the node to Follower for the given term.
+    ///
+    /// Updates `current_term`, resets `voted_for` to `None`, and sets `role` to `Role::Follower`.
+    pub fn become_follower(&mut self, term: u64) {
+        self.current_term = term;
+        self.voted_for = None;
+        self.role = Role::Follower;
+    }
+
+    /// Transitions the node to Candidate for a new term.
+    ///
+    /// Increments `current_term`, votes for itself (`voted_for = Some(self.id)`),
+    /// and sets `role` to `Role::Candidate`.
+    pub fn become_candidate(&mut self) {
+        self.current_term += 1;
+        self.voted_for = Some(self.id);
+        self.role = Role::Candidate;
+    }
+
+    /// Transitions the node to Leader.
+    ///
+    /// Sets `role` to `Role::Leader`. Keeps `current_term` and `voted_for` unchanged.
+    pub fn become_leader(&mut self) {
+        self.role = Role::Leader;
+    }
+
     /// Handles an incoming RequestVote RPC.
     ///
     /// Grants the vote only when all Raft conditions are satisfied:
@@ -105,9 +131,7 @@ impl Node {
     /// Returns a [`RequestVoteReply`] containing the voter's current term and whether the vote was granted.
     pub fn handle_request_vote(&mut self, req: &RequestVote) -> RequestVoteReply {
         if req.term > self.current_term {
-            self.current_term = req.term;
-            self.voted_for = None;
-            self.role = Role::Follower;
+            self.become_follower(req.term);
         }
 
         if req.term < self.current_term {
@@ -169,10 +193,10 @@ impl Node {
 
         // 2. Update term and step down to Follower if leader's term is newer or equal.
         if req.term > self.current_term {
-            self.current_term = req.term;
-            self.voted_for = None;
+            self.become_follower(req.term);
+        } else {
+            self.role = Role::Follower;
         }
-        self.role = Role::Follower;
 
         // 3. Check prev_log_index / prev_log_term consistency.
         if req.prev_log_index > 0 {
@@ -219,9 +243,7 @@ impl Node {
     /// updates `role` to `Role::Candidate`, and returns a [`RequestVote`] RPC
     /// populated with the node's current term, id and last-log metadata.
     pub fn start_election(&mut self) -> RequestVote {
-        self.current_term += 1;
-        self.voted_for = Some(self.id);
-        self.role = Role::Candidate;
+        self.become_candidate();
 
         let (last_log_index, last_log_term) = self
             .log
@@ -792,5 +814,90 @@ mod tests {
         let req = node.start_election();
         assert_eq!(node.voted_for, Some(5));
         assert_eq!(req.candidate_id, 5);
+    }
+
+    // ------------------------------------------------------------------
+    // state transition helper tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn become_follower_sets_term_role_and_voted_for() {
+        let mut node = Node::new();
+        node.current_term = 5;
+        node.role = Role::Leader;
+        node.voted_for = Some(99);
+        node.become_follower(7);
+        assert_eq!(node.current_term, 7);
+        assert_eq!(node.role, Role::Follower);
+        assert_eq!(node.voted_for, None);
+    }
+
+    #[test]
+    fn become_follower_does_not_panic_on_same_term() {
+        let mut node = Node::new();
+        node.become_follower(3);
+        node.become_follower(3);
+        assert_eq!(node.current_term, 3);
+        assert_eq!(node.role, Role::Follower);
+    }
+
+    #[test]
+    fn become_candidate_increments_term_votes_self_and_sets_role() {
+        let mut node = Node::new();
+        node.id = 42;
+        node.current_term = 4;
+        node.role = Role::Follower;
+        node.voted_for = None;
+        node.become_candidate();
+        assert_eq!(node.current_term, 5);
+        assert_eq!(node.role, Role::Candidate);
+        assert_eq!(node.voted_for, Some(42));
+    }
+
+    #[test]
+    fn become_candidate_overwrites_existing_vote() {
+        let mut node = Node::new();
+        node.id = 7;
+        node.current_term = 2;
+        node.voted_for = Some(99);
+        node.become_candidate();
+        assert_eq!(node.current_term, 3);
+        assert_eq!(node.voted_for, Some(7));
+    }
+
+    #[test]
+    fn become_leader_sets_role_keeps_term_and_voted_for() {
+        let mut node = Node::new();
+        node.current_term = 6;
+        node.voted_for = Some(42);
+        node.role = Role::Candidate;
+        node.become_leader();
+        assert_eq!(node.role, Role::Leader);
+        assert_eq!(node.current_term, 6);
+        assert_eq!(node.voted_for, Some(42));
+    }
+
+    #[test]
+    fn become_leader_idempotent() {
+        let mut node = Node::new();
+        node.become_leader();
+        node.become_leader();
+        assert_eq!(node.role, Role::Leader);
+    }
+
+    #[test]
+    fn full_cycle_follower_to_candidate_to_leader() {
+        let mut node = Node::new();
+        node.id = 1;
+        node.become_candidate();
+        assert_eq!(node.role, Role::Candidate);
+        assert_eq!(node.current_term, 1);
+        node.become_leader();
+        assert_eq!(node.role, Role::Leader);
+        assert_eq!(node.current_term, 1);
+        node.become_follower(5);
+        assert_eq!(node.role, Role::Follower);
+        assert_eq!(node.current_term, 5);
+        assert_eq!(node.voted_for, None);
     }
 }
