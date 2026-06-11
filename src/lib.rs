@@ -119,9 +119,53 @@ impl Node {
 
     /// Handles an incoming AppendEntries RPC.
     ///
-    /// Returns `true` if the request is accepted.
+    /// Rejects the request when:
+    /// * `req.term < current_term`
+    /// * The log is missing `prev_log_index` or the term at that index does not match `prev_log_term`
+    ///
+    /// Otherwise updates the term and steps down to Follower, appends/truncates entries as needed,
+    /// and returns `true`.
     pub fn handle_append_entries(&mut self, req: &AppendEntries) -> bool {
-        todo!()
+        // 1. Reject if leader's term is older.
+        if req.term < self.current_term {
+            return false;
+        }
+
+        // 2. Update term and step down to Follower if leader's term is newer or equal.
+        if req.term > self.current_term {
+            self.current_term = req.term;
+            self.voted_for = None;
+        }
+        self.role = Role::Follower;
+
+        // 3. Check prev_log_index / prev_log_term consistency.
+        if req.prev_log_index > 0 {
+            if req.prev_log_index > self.log.len() as u64 {
+                return false;
+            }
+            let prev_term = self.log[(req.prev_log_index - 1) as usize].term;
+            if prev_term != req.prev_log_term {
+                return false;
+            }
+        }
+
+        // 4. Append/truncate entries.
+        let start_idx = req.prev_log_index as usize; // 0-based Vec position for first new entry
+        for (i, entry) in req.entries.iter().enumerate() {
+            let idx = start_idx + i;
+            if idx < self.log.len() {
+                if self.log[idx].term != entry.term {
+                    // Conflict found: truncate existing log and append remaining entries.
+                    self.log.truncate(idx);
+                    self.log.push(entry.clone());
+                }
+                // If terms match, the existing entry is already correct; skip.
+            } else {
+                self.log.push(entry.clone());
+            }
+        }
+
+        true
     }
 }
 
@@ -310,5 +354,223 @@ mod tests {
         };
         assert!(node.handle_request_vote(&req));
         assert_eq!(node.voted_for, Some(7));
+    }
+
+    // ------------------------------------------------------------------
+    // handle_append_entries tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn append_entries_rejected_when_term_is_lower() {
+        let mut node = Node::new();
+        node.current_term = 5;
+        let req = AppendEntries {
+            term: 3,
+            leader_id: 1,
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries: vec![LogEntry {
+                term: 3,
+                command: "set x = 1".to_string(),
+            }],
+            leader_commit: 0,
+        };
+        assert!(!node.handle_append_entries(&req));
+        assert_eq!(node.current_term, 5);
+    }
+
+    #[test]
+    fn append_entries_steps_down_and_updates_term_when_higher_term() {
+        let mut node = Node::new();
+        node.current_term = 2;
+        node.role = Role::Candidate;
+        let req = AppendEntries {
+            term: 5,
+            leader_id: 1,
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries: vec![],
+            leader_commit: 0,
+        };
+        assert!(node.handle_append_entries(&req));
+        assert_eq!(node.current_term, 5);
+        assert_eq!(node.role, Role::Follower);
+    }
+
+    #[test]
+    fn append_entries_rejected_when_prev_log_missing() {
+        let mut node = Node::new();
+        node.log = vec![LogEntry {
+            term: 1,
+            command: "a".to_string(),
+        }];
+        let req = AppendEntries {
+            term: 2,
+            leader_id: 1,
+            prev_log_index: 2,
+            prev_log_term: 1,
+            entries: vec![LogEntry {
+                term: 2,
+                command: "b".to_string(),
+            }],
+            leader_commit: 0,
+        };
+        assert!(!node.handle_append_entries(&req));
+        assert_eq!(node.log.len(), 1);
+    }
+
+    #[test]
+    fn append_entries_rejected_when_prev_log_term_mismatches() {
+        let mut node = Node::new();
+        node.log = vec![
+            LogEntry {
+                term: 1,
+                command: "a".to_string(),
+            },
+            LogEntry {
+                term: 2,
+                command: "b".to_string(),
+            },
+        ];
+        let req = AppendEntries {
+            term: 3,
+            leader_id: 1,
+            prev_log_index: 2,
+            prev_log_term: 1, // actual term at index 2 is 2
+            entries: vec![LogEntry {
+                term: 3,
+                command: "c".to_string(),
+            }],
+            leader_commit: 0,
+        };
+        assert!(!node.handle_append_entries(&req));
+    }
+
+    #[test]
+    fn append_entries_appends_new_entries() {
+        let mut node = Node::new();
+        node.log = vec![LogEntry {
+            term: 1,
+            command: "a".to_string(),
+        }];
+        let req = AppendEntries {
+            term: 2,
+            leader_id: 1,
+            prev_log_index: 1,
+            prev_log_term: 1,
+            entries: vec![
+                LogEntry {
+                    term: 2,
+                    command: "b".to_string(),
+                },
+                LogEntry {
+                    term: 2,
+                    command: "c".to_string(),
+                },
+            ],
+            leader_commit: 0,
+        };
+        assert!(node.handle_append_entries(&req));
+        assert_eq!(node.log.len(), 3);
+        assert_eq!(node.log[1].command, "b");
+        assert_eq!(node.log[2].command, "c");
+    }
+
+    #[test]
+    fn append_entries_truncates_on_conflict_and_appends() {
+        let mut node = Node::new();
+        node.log = vec![
+            LogEntry {
+                term: 1,
+                command: "a".to_string(),
+            },
+            LogEntry {
+                term: 2,
+                command: "b".to_string(),
+            },
+            LogEntry {
+                term: 3,
+                command: "c".to_string(),
+            },
+        ];
+        let req = AppendEntries {
+            term: 4,
+            leader_id: 1,
+            prev_log_index: 1,
+            prev_log_term: 1,
+            entries: vec![
+                LogEntry {
+                    term: 4,
+                    command: "x".to_string(),
+                },
+                LogEntry {
+                    term: 4,
+                    command: "y".to_string(),
+                },
+            ],
+            leader_commit: 0,
+        };
+        assert!(node.handle_append_entries(&req));
+        assert_eq!(node.log.len(), 3);
+        assert_eq!(node.log[0].command, "a");
+        assert_eq!(node.log[0].term, 1);
+        assert_eq!(node.log[1].command, "x");
+        assert_eq!(node.log[1].term, 4);
+        assert_eq!(node.log[2].command, "y");
+        assert_eq!(node.log[2].term, 4);
+    }
+
+    #[test]
+    fn append_entries_heartbeat_accepted_with_empty_entries() {
+        let mut node = Node::new();
+        node.current_term = 2;
+        node.role = Role::Candidate;
+        let req = AppendEntries {
+            term: 2,
+            leader_id: 1,
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries: vec![],
+            leader_commit: 0,
+        };
+        assert!(node.handle_append_entries(&req));
+        assert_eq!(node.role, Role::Follower);
+    }
+
+    #[test]
+    fn append_entries_does_not_duplicate_existing_entries() {
+        let mut node = Node::new();
+        node.log = vec![
+            LogEntry {
+                term: 1,
+                command: "a".to_string(),
+            },
+            LogEntry {
+                term: 2,
+                command: "b".to_string(),
+            },
+        ];
+        let req = AppendEntries {
+            term: 2,
+            leader_id: 1,
+            prev_log_index: 1,
+            prev_log_term: 1,
+            entries: vec![
+                LogEntry {
+                    term: 2,
+                    command: "b".to_string(),
+                },
+                LogEntry {
+                    term: 2,
+                    command: "c".to_string(),
+                },
+            ],
+            leader_commit: 0,
+        };
+        assert!(node.handle_append_entries(&req));
+        assert_eq!(node.log.len(), 3);
+        assert_eq!(node.log[0].command, "a");
+        assert_eq!(node.log[1].command, "b");
+        assert_eq!(node.log[2].command, "c");
     }
 }
