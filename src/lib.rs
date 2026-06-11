@@ -121,6 +121,35 @@ impl Node {
         self.role = Role::Leader;
     }
 
+    /// Returns the index of the last entry in the log.
+    ///
+    /// Returns `0` when the log is empty.
+    pub fn last_log_index(&self) -> u64 {
+        self.log.len() as u64
+    }
+
+    /// Returns the term of the last entry in the log.
+    ///
+    /// Returns `0` when the log is empty.
+    pub fn last_log_term(&self) -> u64 {
+        self.log.last().map(|e| e.term).unwrap_or(0)
+    }
+
+    /// Returns the term at the given 1-based log index.
+    ///
+    /// Returns `None` when the index is `0` or out of bounds.
+    pub fn term_at(&self, index: u64) -> Option<u64> {
+        if index == 0 || index > self.log.len() as u64 {
+            return None;
+        }
+        Some(self.log[(index - 1) as usize].term)
+    }
+
+    /// Appends a single entry to the log.
+    pub fn append_to_log(&mut self, entry: LogEntry) {
+        self.log.push(entry);
+    }
+
     /// Handles an incoming RequestVote RPC.
     ///
     /// Grants the vote only when all Raft conditions are satisfied:
@@ -149,16 +178,10 @@ impl Node {
             };
         }
 
-        // Determine the node's own last-log metadata.
-        let (last_log_index, last_log_term) = self
-            .log
-            .last()
-            .map(|e| (self.log.len() as u64, e.term))
-            .unwrap_or((0, 0));
-
         // Candidate's log must be at least as up-to-date.
-        let is_up_to_date = req.last_log_term > last_log_term
-            || (req.last_log_term == last_log_term && req.last_log_index >= last_log_index);
+        let is_up_to_date = req.last_log_term > self.last_log_term()
+            || (req.last_log_term == self.last_log_term()
+                && req.last_log_index >= self.last_log_index());
 
         if !is_up_to_date {
             return RequestVoteReply {
@@ -245,17 +268,11 @@ impl Node {
     pub fn start_election(&mut self) -> RequestVote {
         self.become_candidate();
 
-        let (last_log_index, last_log_term) = self
-            .log
-            .last()
-            .map(|e| (self.log.len() as u64, e.term))
-            .unwrap_or((0, 0));
-
         RequestVote {
             term: self.current_term,
             candidate_id: self.id,
-            last_log_index,
-            last_log_term,
+            last_log_index: self.last_log_index(),
+            last_log_term: self.last_log_term(),
         }
     }
 }
@@ -899,5 +916,128 @@ mod tests {
         assert_eq!(node.role, Role::Follower);
         assert_eq!(node.current_term, 5);
         assert_eq!(node.voted_for, None);
+    }
+
+    // ------------------------------------------------------------------
+    // log helper tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn last_log_index_on_empty_log_is_zero() {
+        let node = Node::new();
+        assert_eq!(node.last_log_index(), 0);
+    }
+
+    #[test]
+    fn last_log_index_with_entries() {
+        let mut node = Node::new();
+        node.append_to_log(LogEntry {
+            term: 1,
+            command: "a".to_string(),
+        });
+        node.append_to_log(LogEntry {
+            term: 2,
+            command: "b".to_string(),
+        });
+        assert_eq!(node.last_log_index(), 2);
+    }
+
+    #[test]
+    fn last_log_term_on_empty_log_is_zero() {
+        let node = Node::new();
+        assert_eq!(node.last_log_term(), 0);
+    }
+
+    #[test]
+    fn last_log_term_with_entries() {
+        let mut node = Node::new();
+        node.append_to_log(LogEntry {
+            term: 1,
+            command: "a".to_string(),
+        });
+        node.append_to_log(LogEntry {
+            term: 3,
+            command: "b".to_string(),
+        });
+        assert_eq!(node.last_log_term(), 3);
+    }
+
+    #[test]
+    fn term_at_returns_none_for_zero_index() {
+        let mut node = Node::new();
+        node.append_to_log(LogEntry {
+            term: 1,
+            command: "a".to_string(),
+        });
+        assert_eq!(node.term_at(0), None);
+    }
+
+    #[test]
+    fn term_at_returns_none_for_out_of_bounds() {
+        let mut node = Node::new();
+        node.append_to_log(LogEntry {
+            term: 1,
+            command: "a".to_string(),
+        });
+        assert_eq!(node.term_at(2), None);
+        assert_eq!(node.term_at(99), None);
+    }
+
+    #[test]
+    fn term_at_returns_term_for_valid_index() {
+        let mut node = Node::new();
+        node.append_to_log(LogEntry {
+            term: 1,
+            command: "a".to_string(),
+        });
+        node.append_to_log(LogEntry {
+            term: 3,
+            command: "b".to_string(),
+        });
+        assert_eq!(node.term_at(1), Some(1));
+        assert_eq!(node.term_at(2), Some(3));
+    }
+
+    #[test]
+    fn append_to_log_increments_length() {
+        let mut node = Node::new();
+        assert!(node.log.is_empty());
+        node.append_to_log(LogEntry {
+            term: 2,
+            command: "x".to_string(),
+        });
+        assert_eq!(node.log.len(), 1);
+        assert_eq!(node.log[0].term, 2);
+        assert_eq!(node.log[0].command, "x");
+    }
+
+    #[test]
+    fn log_helpers_used_by_internal_methods() {
+        let mut node = Node::new();
+        node.id = 1;
+        node.append_to_log(LogEntry {
+            term: 2,
+            command: "a".to_string(),
+        });
+        let req = node.start_election();
+        assert_eq!(req.last_log_index, 1);
+        assert_eq!(req.last_log_term, 2);
+        assert_eq!(node.last_log_index(), 1);
+        assert_eq!(node.last_log_term(), 2);
+    }
+
+    #[test]
+    fn helpers_agree_with_direct_log_inspection() {
+        let mut node = Node::new();
+        assert_eq!(node.last_log_index(), node.log.len() as u64);
+        node.append_to_log(LogEntry {
+            term: 5,
+            command: "c".to_string(),
+        });
+        assert_eq!(node.last_log_index(), node.log.len() as u64);
+        assert_eq!(node.last_log_term(), node.log.last().unwrap().term);
+        for (i, entry) in node.log.iter().enumerate() {
+            assert_eq!(node.term_at((i + 1) as u64), Some(entry.term));
+        }
     }
 }
