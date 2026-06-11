@@ -46,6 +46,15 @@ pub struct RequestVote {
     pub last_log_term: u64,
 }
 
+/// RequestVote RPC reply sent by voters back to the candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestVoteReply {
+    /// Current term of the voter (for the candidate to update itself).
+    pub term: u64,
+    /// `true` means the candidate received the vote.
+    pub vote_granted: bool,
+}
+
 /// AppendEntries RPC arguments sent by leaders to replicate log entries.
 #[derive(Debug)]
 pub struct AppendEntries {
@@ -61,6 +70,15 @@ pub struct AppendEntries {
     pub entries: Vec<LogEntry>,
     /// Leader's commit index.
     pub leader_commit: u64,
+}
+
+/// AppendEntries RPC reply sent by followers back to the leader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendEntriesReply {
+    /// Current term of the follower (for the leader to update itself).
+    pub term: u64,
+    /// `true` if the follower matched prev_log_index/prev_log_term and appends succeeded.
+    pub success: bool,
 }
 
 impl Node {
@@ -81,8 +99,8 @@ impl Node {
     /// * The node hasn't voted for a different candidate in this term (`voted_for` is `None` or matches `candidate_id`).
     /// * The candidate's log is at least as up-to-date as the node's own log.
     ///
-    /// Returns `true` if the vote is granted.
-    pub fn handle_request_vote(&mut self, req: &RequestVote) -> bool {
+    /// Returns a [`RequestVoteReply`] containing the voter's current term and whether the vote was granted.
+    pub fn handle_request_vote(&mut self, req: &RequestVote) -> RequestVoteReply {
         if req.term > self.current_term {
             self.current_term = req.term;
             self.voted_for = None;
@@ -90,12 +108,18 @@ impl Node {
         }
 
         if req.term < self.current_term {
-            return false;
+            return RequestVoteReply {
+                term: self.current_term,
+                vote_granted: false,
+            };
         }
 
         // Check whether we already voted for a different candidate this term.
         if self.voted_for.is_some() && self.voted_for != Some(req.candidate_id) {
-            return false;
+            return RequestVoteReply {
+                term: self.current_term,
+                vote_granted: false,
+            };
         }
 
         // Determine the node's own last-log metadata.
@@ -110,11 +134,17 @@ impl Node {
             || (req.last_log_term == last_log_term && req.last_log_index >= last_log_index);
 
         if !is_up_to_date {
-            return false;
+            return RequestVoteReply {
+                term: self.current_term,
+                vote_granted: false,
+            };
         }
 
         self.voted_for = Some(req.candidate_id);
-        true
+        RequestVoteReply {
+            term: self.current_term,
+            vote_granted: true,
+        }
     }
 
     /// Handles an incoming AppendEntries RPC.
@@ -124,11 +154,14 @@ impl Node {
     /// * The log is missing `prev_log_index` or the term at that index does not match `prev_log_term`
     ///
     /// Otherwise updates the term and steps down to Follower, appends/truncates entries as needed,
-    /// and returns `true`.
-    pub fn handle_append_entries(&mut self, req: &AppendEntries) -> bool {
+    /// and returns an [`AppendEntriesReply`] with `success: true`.
+    pub fn handle_append_entries(&mut self, req: &AppendEntries) -> AppendEntriesReply {
         // 1. Reject if leader's term is older.
         if req.term < self.current_term {
-            return false;
+            return AppendEntriesReply {
+                term: self.current_term,
+                success: false,
+            };
         }
 
         // 2. Update term and step down to Follower if leader's term is newer or equal.
@@ -141,11 +174,17 @@ impl Node {
         // 3. Check prev_log_index / prev_log_term consistency.
         if req.prev_log_index > 0 {
             if req.prev_log_index > self.log.len() as u64 {
-                return false;
+                return AppendEntriesReply {
+                    term: self.current_term,
+                    success: false,
+                };
             }
             let prev_term = self.log[(req.prev_log_index - 1) as usize].term;
             if prev_term != req.prev_log_term {
-                return false;
+                return AppendEntriesReply {
+                    term: self.current_term,
+                    success: false,
+                };
             }
         }
 
@@ -165,7 +204,10 @@ impl Node {
             }
         }
 
-        true
+        AppendEntriesReply {
+            term: self.current_term,
+            success: true,
+        }
     }
 }
 
@@ -191,8 +233,28 @@ mod tests {
         assert_eq!(entry.command, "set x = 10");
     }
 
+    #[test]
+    fn request_vote_reply_construction() {
+        let reply = RequestVoteReply {
+            term: 3,
+            vote_granted: true,
+        };
+        assert_eq!(reply.term, 3);
+        assert!(reply.vote_granted);
+    }
+
+    #[test]
+    fn append_entries_reply_construction() {
+        let reply = AppendEntriesReply {
+            term: 2,
+            success: false,
+        };
+        assert_eq!(reply.term, 2);
+        assert!(!reply.success);
+    }
+
     // ------------------------------------------------------------------
-    // handle_request_vote tests
+    // handle_request_vote tests (via RequestVoteReply)
     // ------------------------------------------------------------------
 
     #[test]
@@ -205,7 +267,11 @@ mod tests {
             last_log_index: 0,
             last_log_term: 0,
         };
-        assert!(!node.handle_request_vote(&req));
+        let reply = node.handle_request_vote(&req);
+        assert_eq!(reply, RequestVoteReply {
+            term: 5,
+            vote_granted: false,
+        });
         assert_eq!(node.voted_for, None);
     }
 
@@ -219,7 +285,11 @@ mod tests {
             last_log_index: 0,
             last_log_term: 0,
         };
-        assert!(node.handle_request_vote(&req));
+        let reply = node.handle_request_vote(&req);
+        assert_eq!(reply, RequestVoteReply {
+            term: 2,
+            vote_granted: true,
+        });
         assert_eq!(node.voted_for, Some(1));
     }
 
@@ -235,7 +305,11 @@ mod tests {
             last_log_index: 0,
             last_log_term: 0,
         };
-        assert!(node.handle_request_vote(&req));
+        let reply = node.handle_request_vote(&req);
+        assert_eq!(reply, RequestVoteReply {
+            term: 5,
+            vote_granted: true,
+        });
         assert_eq!(node.current_term, 5);
         assert_eq!(node.role, Role::Follower);
         assert_eq!(node.voted_for, Some(1));
@@ -252,7 +326,11 @@ mod tests {
             last_log_index: 0,
             last_log_term: 0,
         };
-        assert!(!node.handle_request_vote(&req));
+        let reply = node.handle_request_vote(&req);
+        assert_eq!(reply, RequestVoteReply {
+            term: 3,
+            vote_granted: false,
+        });
         assert_eq!(node.voted_for, Some(2));
     }
 
@@ -267,7 +345,11 @@ mod tests {
             last_log_index: 0,
             last_log_term: 0,
         };
-        assert!(node.handle_request_vote(&req));
+        let reply = node.handle_request_vote(&req);
+        assert_eq!(reply, RequestVoteReply {
+            term: 3,
+            vote_granted: true,
+        });
         assert_eq!(node.voted_for, Some(1));
     }
 
@@ -290,7 +372,11 @@ mod tests {
             last_log_index: 2,
             last_log_term: 3, // node last_log_term is 4
         };
-        assert!(!node.handle_request_vote(&req));
+        let reply = node.handle_request_vote(&req);
+        assert_eq!(reply, RequestVoteReply {
+            term: 5,
+            vote_granted: false,
+        });
         assert_eq!(node.voted_for, None);
     }
 
@@ -313,7 +399,11 @@ mod tests {
             last_log_index: 1, // node last_log_index is 2
             last_log_term: 2,
         };
-        assert!(!node.handle_request_vote(&req));
+        let reply = node.handle_request_vote(&req);
+        assert_eq!(reply, RequestVoteReply {
+            term: 3,
+            vote_granted: false,
+        });
     }
 
     #[test]
@@ -335,7 +425,11 @@ mod tests {
             last_log_index: 2,
             last_log_term: 2,
         };
-        assert!(node.handle_request_vote(&req));
+        let reply = node.handle_request_vote(&req);
+        assert_eq!(reply, RequestVoteReply {
+            term: 3,
+            vote_granted: true,
+        });
         assert_eq!(node.voted_for, Some(1));
     }
 
@@ -352,12 +446,16 @@ mod tests {
             last_log_index: 5,
             last_log_term: 3,
         };
-        assert!(node.handle_request_vote(&req));
+        let reply = node.handle_request_vote(&req);
+        assert_eq!(reply, RequestVoteReply {
+            term: 2,
+            vote_granted: true,
+        });
         assert_eq!(node.voted_for, Some(7));
     }
 
     // ------------------------------------------------------------------
-    // handle_append_entries tests
+    // handle_append_entries tests (via AppendEntriesReply)
     // ------------------------------------------------------------------
 
     #[test]
@@ -375,7 +473,11 @@ mod tests {
             }],
             leader_commit: 0,
         };
-        assert!(!node.handle_append_entries(&req));
+        let reply = node.handle_append_entries(&req);
+        assert_eq!(reply, AppendEntriesReply {
+            term: 5,
+            success: false,
+        });
         assert_eq!(node.current_term, 5);
     }
 
@@ -392,7 +494,11 @@ mod tests {
             entries: vec![],
             leader_commit: 0,
         };
-        assert!(node.handle_append_entries(&req));
+        let reply = node.handle_append_entries(&req);
+        assert_eq!(reply, AppendEntriesReply {
+            term: 5,
+            success: true,
+        });
         assert_eq!(node.current_term, 5);
         assert_eq!(node.role, Role::Follower);
     }
@@ -415,7 +521,11 @@ mod tests {
             }],
             leader_commit: 0,
         };
-        assert!(!node.handle_append_entries(&req));
+        let reply = node.handle_append_entries(&req);
+        assert_eq!(reply, AppendEntriesReply {
+            term: 2,
+            success: false,
+        });
         assert_eq!(node.log.len(), 1);
     }
 
@@ -443,7 +553,11 @@ mod tests {
             }],
             leader_commit: 0,
         };
-        assert!(!node.handle_append_entries(&req));
+        let reply = node.handle_append_entries(&req);
+        assert_eq!(reply, AppendEntriesReply {
+            term: 3,
+            success: false,
+        });
     }
 
     #[test]
@@ -470,7 +584,11 @@ mod tests {
             ],
             leader_commit: 0,
         };
-        assert!(node.handle_append_entries(&req));
+        let reply = node.handle_append_entries(&req);
+        assert_eq!(reply, AppendEntriesReply {
+            term: 2,
+            success: true,
+        });
         assert_eq!(node.log.len(), 3);
         assert_eq!(node.log[1].command, "b");
         assert_eq!(node.log[2].command, "c");
@@ -510,7 +628,11 @@ mod tests {
             ],
             leader_commit: 0,
         };
-        assert!(node.handle_append_entries(&req));
+        let reply = node.handle_append_entries(&req);
+        assert_eq!(reply, AppendEntriesReply {
+            term: 4,
+            success: true,
+        });
         assert_eq!(node.log.len(), 3);
         assert_eq!(node.log[0].command, "a");
         assert_eq!(node.log[0].term, 1);
@@ -533,7 +655,11 @@ mod tests {
             entries: vec![],
             leader_commit: 0,
         };
-        assert!(node.handle_append_entries(&req));
+        let reply = node.handle_append_entries(&req);
+        assert_eq!(reply, AppendEntriesReply {
+            term: 2,
+            success: true,
+        });
         assert_eq!(node.role, Role::Follower);
     }
 
@@ -567,7 +693,11 @@ mod tests {
             ],
             leader_commit: 0,
         };
-        assert!(node.handle_append_entries(&req));
+        let reply = node.handle_append_entries(&req);
+        assert_eq!(reply, AppendEntriesReply {
+            term: 2,
+            success: true,
+        });
         assert_eq!(node.log.len(), 3);
         assert_eq!(node.log[0].command, "a");
         assert_eq!(node.log[1].command, "b");
