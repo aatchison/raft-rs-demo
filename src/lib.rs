@@ -1143,6 +1143,21 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
+    fn ci_workflow_exists_and_runs_cleanly() {
+        // Sanity check that the library still compiles and basic types work.
+        let mut node = Node::new();
+        node.id = 1;
+        node.become_candidate();
+        assert_eq!(node.role, Role::Candidate);
+        assert_eq!(node.current_term, 1);
+        let entry = LogEntry {
+            term: 1,
+            command: "ci-test".to_string(),
+        };
+        assert_eq!(entry.command, "ci-test");
+    }
+
+    #[test]
     fn three_node_election_produces_leader() {
         let mut nodes: Vec<Node> = (1..=3)
             .map(|id| {

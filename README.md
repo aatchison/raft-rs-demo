@@ -1,5 +1,7 @@
 # raft-rs-demo
 
+[![CI](https://github.com/aatchison/raft-rs-demo/actions/workflows/ci.yml/badge.svg)](https://github.com/aatchison/raft-rs-demo/actions/workflows/ci.yml)
+
 A minimal Raft consensus skeleton in Rust.
 
 This project demonstrates core Raft types and message handlers without a full network or persistence layer:
