@@ -23,6 +23,8 @@ pub struct LogEntry {
 /// A Raft node holding persistent state and the current role.
 #[derive(Debug)]
 pub struct Node {
+    /// The unique identifier of this node.
+    pub id: u64,
     /// Latest term the node has seen.
     pub current_term: u64,
     /// CandidateId that received this node's vote in the current term (if any).
@@ -85,6 +87,7 @@ impl Node {
     /// Creates a new Node initialized as a Follower with term 0 and an empty log.
     pub fn new() -> Self {
         Node {
+            id: 0,
             current_term: 0,
             voted_for: None,
             log: Vec::new(),
@@ -207,6 +210,30 @@ impl Node {
         AppendEntriesReply {
             term: self.current_term,
             success: true,
+        }
+    }
+
+    /// Starts a new election, transitioning the node to Candidate.
+    ///
+    /// Increments `current_term`, resets `voted_for` to this node's own `id`,
+    /// updates `role` to `Role::Candidate`, and returns a [`RequestVote`] RPC
+    /// populated with the node's current term, id and last-log metadata.
+    pub fn start_election(&mut self) -> RequestVote {
+        self.current_term += 1;
+        self.voted_for = Some(self.id);
+        self.role = Role::Candidate;
+
+        let (last_log_index, last_log_term) = self
+            .log
+            .last()
+            .map(|e| (self.log.len() as u64, e.term))
+            .unwrap_or((0, 0));
+
+        RequestVote {
+            term: self.current_term,
+            candidate_id: self.id,
+            last_log_index,
+            last_log_term,
         }
     }
 }
@@ -702,5 +729,68 @@ mod tests {
         assert_eq!(node.log[0].command, "a");
         assert_eq!(node.log[1].command, "b");
         assert_eq!(node.log[2].command, "c");
+    }
+
+    // ------------------------------------------------------------------
+    // start_election tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn start_election_transitions_to_candidate() {
+        let mut node = Node::new();
+        node.id = 42;
+        let req = node.start_election();
+        assert_eq!(node.role, Role::Candidate);
+        assert_eq!(node.current_term, 1);
+        assert_eq!(node.voted_for, Some(42));
+        assert_eq!(req.term, 1);
+        assert_eq!(req.candidate_id, 42);
+        assert_eq!(req.last_log_index, 0);
+        assert_eq!(req.last_log_term, 0);
+    }
+
+    #[test]
+    fn start_election_increments_term_each_call() {
+        let mut node = Node::new();
+        node.id = 1;
+        let req1 = node.start_election();
+        assert_eq!(req1.term, 1);
+        let req2 = node.start_election();
+        assert_eq!(req2.term, 2);
+        assert_eq!(node.current_term, 2);
+    }
+
+    #[test]
+    fn start_election_populates_last_log_metadata() {
+        let mut node = Node::new();
+        node.id = 7;
+        node.log = vec![
+            LogEntry {
+                term: 2,
+                command: "a".to_string(),
+            },
+            LogEntry {
+                term: 3,
+                command: "b".to_string(),
+            },
+        ];
+        let req = node.start_election();
+        assert_eq!(node.role, Role::Candidate);
+        assert_eq!(node.current_term, 1);
+        assert_eq!(node.voted_for, Some(7));
+        assert_eq!(req.last_log_index, 2);
+        assert_eq!(req.last_log_term, 3);
+    }
+
+    #[test]
+    fn start_election_overwrites_prior_vote() {
+        let mut node = Node::new();
+        node.id = 5;
+        node.current_term = 3;
+        node.voted_for = Some(99);
+        node.role = Role::Follower;
+        let req = node.start_election();
+        assert_eq!(node.voted_for, Some(5));
+        assert_eq!(req.candidate_id, 5);
     }
 }
