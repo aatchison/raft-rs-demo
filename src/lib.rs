@@ -33,6 +33,10 @@ pub struct Node {
     pub log: Vec<LogEntry>,
     /// The current role of this node.
     pub role: Role,
+    /// Highest log entry known to be committed (1-based, 0 means none).
+    pub commit_index: u64,
+    /// Highest log entry applied to the state machine (1-based, 0 means none).
+    pub last_applied: u64,
 }
 
 /// RequestVote RPC arguments sent by candidates to gather votes.
@@ -92,6 +96,8 @@ impl Node {
             voted_for: None,
             log: Vec::new(),
             role: Role::Follower,
+            commit_index: 0,
+            last_applied: 0,
         }
     }
 
@@ -148,6 +154,17 @@ impl Node {
     /// Appends a single entry to the log.
     pub fn append_to_log(&mut self, entry: LogEntry) {
         self.log.push(entry);
+    }
+
+    /// Advances `commit_index` up to the given `leader_commit` but not past the last log entry.
+    ///
+    /// Sets `commit_index` to `min(leader_commit, last_log_index)`. If `leader_commit`
+    /// is already behind the current `commit_index`, `commit_index` is left unchanged.
+    pub fn advance_commit_index(&mut self, leader_commit: u64) {
+        let target = leader_commit.min(self.last_log_index());
+        if target > self.commit_index {
+            self.commit_index = target;
+        }
     }
 
     /// Handles an incoming RequestVote RPC.
@@ -1039,5 +1056,85 @@ mod tests {
         for (i, entry) in node.log.iter().enumerate() {
             assert_eq!(node.term_at((i + 1) as u64), Some(entry.term));
         }
+    }
+
+    // ------------------------------------------------------------------
+    // commit tracking tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn node_new_has_zero_commit_and_applied() {
+        let node = Node::new();
+        assert_eq!(node.commit_index, 0);
+        assert_eq!(node.last_applied, 0);
+    }
+
+    #[test]
+    fn advance_commit_index_updates_to_leader_commit() {
+        let mut node = Node::new();
+        node.append_to_log(LogEntry {
+            term: 1,
+            command: "a".to_string(),
+        });
+        node.append_to_log(LogEntry {
+            term: 1,
+            command: "b".to_string(),
+        });
+        node.advance_commit_index(2);
+        assert_eq!(node.commit_index, 2);
+    }
+
+    #[test]
+    fn advance_commit_index_caps_at_last_log_index() {
+        let mut node = Node::new();
+        node.append_to_log(LogEntry {
+            term: 1,
+            command: "a".to_string(),
+        });
+        node.advance_commit_index(5);
+        assert_eq!(node.commit_index, 1);
+    }
+
+    #[test]
+    fn advance_commit_index_does_not_regress() {
+        let mut node = Node::new();
+        node.append_to_log(LogEntry {
+            term: 1,
+            command: "a".to_string(),
+        });
+        node.append_to_log(LogEntry {
+            term: 1,
+            command: "b".to_string(),
+        });
+        node.advance_commit_index(2);
+        assert_eq!(node.commit_index, 2);
+        node.advance_commit_index(1);
+        assert_eq!(node.commit_index, 2);
+    }
+
+    #[test]
+    fn advance_commit_index_noop_when_no_log_entries() {
+        let mut node = Node::new();
+        node.advance_commit_index(3);
+        assert_eq!(node.commit_index, 0);
+    }
+
+    #[test]
+    fn advance_commit_index_multiple_calls_monotonic() {
+        let mut node = Node::new();
+        for i in 1..=5 {
+            node.append_to_log(LogEntry {
+                term: 1,
+                command: format!("cmd-{}", i),
+            });
+        }
+        node.advance_commit_index(2);
+        assert_eq!(node.commit_index, 2);
+        node.advance_commit_index(4);
+        assert_eq!(node.commit_index, 4);
+        node.advance_commit_index(4);
+        assert_eq!(node.commit_index, 4);
+        node.advance_commit_index(10);
+        assert_eq!(node.commit_index, 5);
     }
 }
